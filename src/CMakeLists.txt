@@ -54,6 +54,7 @@ set(src
   flb_fstore.c
   flb_thread_pool.c
   flb_routes_mask.c
+  flb_output_order.c
   )
 
 if(FLB_SYSTEM_WINDOWS)

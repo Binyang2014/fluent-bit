@@ -177,7 +177,8 @@ static inline int handle_output_event(flb_pipefd_t fd, struct flb_config *config
 
     task = config->tasks_map[task_id].task;
     ins  = flb_output_get_instance(config, out_id);
-    if (flb_output_is_threaded(ins) == FLB_FALSE) {
+    if (flb_output_is_threaded(ins) == FLB_FALSE &&
+        flb_output_is_keep_order(ins) == FLB_FALSE) {
         flb_output_flush_finished(config, out_id);
     }
 
@@ -213,6 +214,9 @@ static inline int handle_output_event(flb_pipefd_t fd, struct flb_config *config
         }
         flb_task_retry_clean(task, ins);
         flb_task_users_dec(task, FLB_TRUE);
+        if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+            flb_output_order_manager_resume(ins);
+        }
     }
     else if (ret == FLB_RETRY) {
         /* Create a Task-Retry */
@@ -236,6 +240,9 @@ static inline int handle_output_event(flb_pipefd_t fd, struct flb_config *config
                      flb_output_name(ins));
 
             flb_task_users_dec(task, FLB_TRUE);
+            if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+                flb_output_order_manager_resume(ins);
+            }
             return 0;
         }
 
@@ -281,6 +288,9 @@ static inline int handle_output_event(flb_pipefd_t fd, struct flb_config *config
         flb_metrics_sum(FLB_METRIC_OUT_ERROR, 1, ins->metrics);
 #endif
         flb_task_users_dec(task, FLB_TRUE);
+        if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+            flb_output_order_manager_resume(ins);
+        }
     }
 
     return 0;

@@ -44,6 +44,7 @@
 #include <fluent-bit/flb_str.h>
 #include <fluent-bit/flb_http_client.h>
 #include <fluent-bit/tls/flb_tls.h>
+#include <fluent-bit/flb_output_order.h>
 #include <fluent-bit/flb_output_thread.h>
 #include <fluent-bit/flb_upstream.h>
 #include <fluent-bit/flb_upstream_ha.h>
@@ -315,6 +316,13 @@ struct flb_output_instance {
     /* If the thread pool was created, this flag is turned on */
     int is_threaded;
 
+    /*
+     * Keep order: optional limit set by configuration, so the output plugin will
+     * keep the log line in order.
+     */
+    int is_keep_order;
+    struct flb_out_order_manager *ord_mgr;
+
     /* List of upstreams */
     struct mk_list upstreams;
 
@@ -360,6 +368,11 @@ struct flb_output_coro {
 static FLB_INLINE int flb_output_is_threaded(struct flb_output_instance *ins)
 {
     return ins->is_threaded;
+}
+
+static FLB_INLINE int flb_output_is_keep_order(struct flb_output_instance* ins)
+{
+    return ins->is_keep_order;
 }
 
 /* When an output_thread is going to be destroyed, this callback is triggered */
@@ -523,6 +536,11 @@ struct flb_output_coro *flb_output_coro_create(struct flb_task *task,
         mk_list_add(&out_coro->_head, &th_ins->coros);
         pthread_mutex_unlock(&th_ins->coro_mutex);
     }
+    else if (o_ins->is_keep_order == FLB_TRUE) {
+        pthread_mutex_lock(&o_ins->ord_mgr->coro_mutex);
+        mk_list_add(&out_coro->_head, &o_ins->ord_mgr->coros);
+        pthread_mutex_unlock(&o_ins->ord_mgr->coro_mutex);
+    }
     else {
         mk_list_add(&out_coro->_head, &o_ins->coros);
     }
@@ -557,6 +575,7 @@ static inline void flb_output_return(int ret, struct flb_coro *co) {
     struct flb_output_coro *out_coro;
     struct flb_output_instance *o_ins;
     struct flb_out_thread_instance *th_ins = NULL;
+    struct flb_out_order_manager *ord_mgr = NULL;
 
     out_coro = (struct flb_output_coro *) co->data;
     o_ins = out_coro->o_ins;
@@ -586,6 +605,11 @@ static inline void flb_output_return(int ret, struct flb_coro *co) {
         th_ins = flb_output_thread_instance_get();
         pipe_fd = th_ins->ch_thread_events[1];
     }
+    else if (flb_output_is_keep_order(o_ins) == FLB_TRUE) {
+        ord_mgr = o_ins->ord_mgr;
+        pipe_fd = ord_mgr->ch_plugin_events[1];
+
+    }
     else {
         pipe_fd = out_coro->o_ins->ch_events[1];
     }
@@ -614,6 +638,9 @@ static inline int flb_output_coros_size(struct flb_output_instance *ins)
          * every running thread of the thread pool.
          */
         size = flb_output_thread_pool_coros_size(ins);
+    }
+    else if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+        size = flb_output_order_manager_coros_size(ins);
     }
     else {
         size = mk_list_size(&ins->coros);

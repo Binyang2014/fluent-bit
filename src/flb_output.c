@@ -122,6 +122,7 @@ void flb_output_coro_prepare_destroy(struct flb_output_coro *out_coro)
 {
     struct flb_output_instance *ins = out_coro->o_ins;
     struct flb_out_thread_instance *th_ins;
+    struct flb_out_order_manager *ord_mgr;
 
     /* Move output coroutine context from active list to the destroy one */
     if (flb_output_is_threaded(ins) == FLB_TRUE) {
@@ -130,6 +131,13 @@ void flb_output_coro_prepare_destroy(struct flb_output_coro *out_coro)
         mk_list_del(&out_coro->_head);
         mk_list_add(&out_coro->_head, &th_ins->coros_destroy);
         pthread_mutex_unlock(&th_ins->coro_mutex);
+    }
+    else if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+        ord_mgr = ins->ord_mgr;
+        pthread_mutex_lock(&ord_mgr->coro_mutex);
+        mk_list_del(&out_coro->_head);
+        mk_list_add(&out_coro->_head, &ord_mgr->coros_destroy);
+        pthread_mutex_unlock(&ord_mgr->coro_mutex);
     }
     else {
         mk_list_del(&out_coro->_head);
@@ -151,6 +159,15 @@ int flb_output_coro_id_get(struct flb_output_instance *ins)
         /* reset once it reach the maximum allowed */
         if (th_ins->coro_id > max) {
             th_ins->coro_id = 0;
+        }
+    }
+    else if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+        id = ins->ord_mgr->coro_id;
+        ins->ord_mgr->coro_id++;
+
+        /* reset once it reach the maximum allowed */
+        if (ins->ord_mgr->coro_id > max) {
+            ins->ord_mgr->coro_id = 0;
         }
     }
     else {
@@ -190,6 +207,13 @@ int flb_output_task_flush(struct flb_task *task,
 
         /* Dispatch the task to the thread pool */
         ret = flb_output_thread_pool_flush(task, out_ins, config);
+        if (ret == -1) {
+            flb_task_users_dec(task, FLB_FALSE);
+        }
+    }
+    else if (flb_output_is_keep_order(out_ins) == FLB_TRUE) {
+        flb_task_users_inc(task);
+        ret = flb_output_order_manager_flush(task, out_ins, config);
         if (ret == -1) {
             flb_task_users_dec(task, FLB_FALSE);
         }
@@ -303,6 +327,9 @@ void flb_output_exit(struct flb_config *config)
         if (flb_output_is_threaded(ins) == FLB_TRUE) {
             flb_output_thread_pool_destroy(ins);
         }
+        else if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+            flb_output_order_manager_destroy(ins);
+        }
 
         /* Check a exit callback */
         if (p->cb_exit) {
@@ -378,6 +405,9 @@ int flb_output_flush_finished(struct flb_config *config, int out_id)
         th_ins = flb_output_thread_instance_get();
         list = &th_ins->coros_destroy;
     }
+    else if (flb_output_is_keep_order(ins) == FLB_TRUE) {
+        list = &ins->ord_mgr->coros_destroy;
+    }
     else {
         list = &ins->coros_destroy;
     }
@@ -431,6 +461,7 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
     instance->log_level = -1;
     instance->test_mode = FLB_FALSE;
     instance->is_threaded = FLB_FALSE;
+    instance->is_keep_order = FLB_FALSE;
 
 
     /* Retrieve an instance id for the output instance */
@@ -718,6 +749,16 @@ int flb_output_set_property(struct flb_output_instance *ins,
         ins->tp_workers = atoi(tmp);
         flb_sds_destroy(tmp);
     }
+    else if (prop_key_check("keep_order", k, len) == 0 && tmp) {
+        /* Set we should keep order for the output*/
+        if (strcasecmp(tmp, "true") == 0 || strcasecmp(tmp, "on") == 0) {
+            ins->is_keep_order = FLB_TRUE;
+        }
+        else {
+            ins->is_keep_order = FLB_FALSE;
+        }
+        flb_sds_destroy(tmp);
+    }
     else {
         /*
          * Create the property, we don't pass the value since we will
@@ -944,6 +985,17 @@ int flb_output_init_all(struct flb_config *config)
             }
 
             flb_output_thread_pool_start(ins);
+        }
+        /* Keep order enabled? */
+        else if (ins->is_keep_order == FLB_TRUE) {
+            ret = flb_output_order_manager_create(config, ins);
+            if (ret == -1) {
+                flb_error("[output] could not start order manager for %s plugin",
+                          p->name);
+                return -1;
+            }
+
+            flb_output_order_manager_start(ins);
         }
     }
 
